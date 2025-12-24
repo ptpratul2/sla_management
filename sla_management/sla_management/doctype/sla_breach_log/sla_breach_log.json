@@ -1,7 +1,7 @@
 {
  "actions": [],
  "allow_rename": 1,
- "creation": "2024-01-01 10:00:00.000000",
+ "creation": "2024-01-01 10:00:00",
  "doctype": "DocType",
  "editable_grid": 1,
  "engine": "InnoDB",
@@ -14,7 +14,8 @@
   "hours_exceeded",
   "last_stage_change_on",
   "breached_on",
-  "boss_email"
+  "reporting_manager_email",
+  "message"
  ],
  "fields": [
   {
@@ -67,15 +68,20 @@
    "read_only": 1
   },
   {
-   "fieldname": "boss_email",
+   "fieldname": "reporting_manager_email",
    "fieldtype": "Data",
-   "label": "Boss Email",
+   "label": "Reporting Manager Email",
    "read_only": 1
+  },
+  {
+   "fieldname": "message",
+   "fieldtype": "Small Text",
+   "label": "Message"
   }
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2024-01-01 10:00:00.000000",
+ "modified": "2025-12-23 22:27:00.290623",
  "modified_by": "Administrator",
  "module": "SLA Management",
  "name": "SLA Breach Log",
@@ -103,8 +109,8 @@
    "share": 1
   }
  ],
+ "row_format": "Dynamic",
  "sort_field": "modified",
  "sort_order": "DESC",
  "states": []
 }
-
