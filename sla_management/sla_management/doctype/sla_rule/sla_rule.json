@@ -1,5 +1,6 @@
 {
  "actions": [],
+ "allow_import": 1,
  "allow_rename": 1,
  "creation": "2025-11-17 22:57:18.713347",
  "doctype": "DocType",
@@ -47,12 +48,12 @@
    "fieldtype": "Data",
    "in_list_view": 1,
    "label": "Stage Value",
-   "placeholder": "e.g., New, Proposal Sent",
-   "reqd": 1
+   "placeholder": "e.g., New, Proposal Sent"
   },
   {
    "fieldname": "max_hours_allowed",
    "fieldtype": "Float",
+   "in_list_view": 1,
    "label": "Max Hours Allowed",
    "reqd": 1
   },
@@ -83,12 +84,13 @@
   {
    "fieldname": "message",
    "fieldtype": "Small Text",
+   "in_list_view": 1,
    "label": "Message"
   }
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2025-12-23 22:26:43.339840",
+ "modified": "2026-01-19 10:04:19.156657",
  "modified_by": "Administrator",
  "module": "SLA Management",
  "name": "SLA Rule",

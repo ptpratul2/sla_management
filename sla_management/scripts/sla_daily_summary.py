@@ -1,35 +1,33 @@
 
 
+
 # Copyright (c) 2024
 # SLA Management App
 
 import frappe
-from frappe.utils import now_datetime, add_days, get_datetime
+from frappe.utils import now_datetime, add_days, get_datetime, validate_email_address
 from frappe import _
 
 
 def sla_daily_summary():
     """
-    Daily Scheduled Job (Runs at 7 AM)
+    Daily Scheduled Job
+    - Collects all SLA Breach Log records (ALL verticals)
+    - Groups them by reporting_manager_email
+    - Sends ONE consolidated email per manager
     """
 
+    print("Executing SLA Daily Summary...")
     frappe.logger().info("Starting SLA Daily Summary...")
 
-    # 1. Verticals filter
-    ALLOWED_VERTICALS = [
-        "Permanent Staffing",
-        "Temporary Staffing"
-    ]
-
-    # 2. Pichle 24 ghante ka filter
+    # Last 24 hours
     from_date = add_days(now_datetime(), -1)
 
-    # 3. Fetching Breaches (Added "message" in fields)
+    # 1️ Fetch ALL SLA Breaches (no vertical filter)
     breaches = frappe.get_all(
         "SLA Breach Log",
         filters={
-            "breached_on": [">=", from_date],
-            "vertical": ["in", ALLOWED_VERTICALS]
+            "breached_on": [">=", from_date]
         },
         fields=[
             "name",
@@ -41,77 +39,115 @@ def sla_daily_summary():
             "hours_exceeded",
             "breached_on",
             "reporting_manager_email",
-            "message"  # <--- Added message field
-        ]
+            "message"
+        ],
+        order_by="reporting_manager_email asc"
     )
 
     if not breaches:
-        frappe.logger().info("No SLA breaches found in the last 24 hours.")
+        print("No SLA breaches found.")
         return 0
 
-    # 4. Grouping Breaches by Manager Email
-    breaches_by_manager = {}
-    
-    for breach in breaches:
-        email = breach.reporting_manager_email or "crm-head@promptpersonnel.com"
-        
-        if email not in breaches_by_manager:
-            breaches_by_manager[email] = []
-        
-        breaches_by_manager[email].append(breach)
+    print(f"Total breaches found: {len(breaches)}")
 
-    # 5. Sending Emails
+    # 2️ Group breaches by VALID manager email
+    breaches_by_manager = {}
+    skipped = 0
+
+    for breach in breaches:
+        mgr_email = breach.get("reporting_manager_email")
+
+        # Skip missing email
+        if not mgr_email:
+            skipped += 1
+            continue
+
+        email = mgr_email.strip().lower()
+
+        # Skip invalid email
+        if not validate_email_address(email):
+            skipped += 1
+            continue
+
+        breaches_by_manager.setdefault(email, []).append(breach)
+
+    print(f"Skipped {skipped} breaches due to missing/invalid email")
+
+    if not breaches_by_manager:
+        print("No valid manager emails found. No emails sent.")
+        return len(breaches)
+
+    # 3️ Send consolidated email per manager
     sent_count = 0
+    base_url = frappe.utils.get_url()
+
     for manager_email, manager_breaches in breaches_by_manager.items():
         try:
+            print(f"Preparing email for: {manager_email} ({len(manager_breaches)} records)")
+
             subject = _("Daily SLA Breach Summary: {0} Records").format(len(manager_breaches))
+            rows = []
 
-            # Table Header (Added Message Column)
-            rows = [
-                """<tr style="background-color: #f8f9fa;">
-                    <th style="border: 1px solid #ddd; padding: 8px;">Record ID</th>
-                    <th style="border: 1px solid #ddd; padding: 8px;">Vertical</th>
-                    <th style="border: 1px solid #ddd; padding: 8px;">Stage</th>
-                    <th style="border: 1px solid #ddd; padding: 8px;">Exceeded (Hrs)</th>
-                    <th style="border: 1px solid #ddd; padding: 8px;">Owner</th>
-                    <th style="border: 1px solid #ddd; padding: 8px;">Message</th>
-                    <th style="border: 1px solid #ddd; padding: 8px;">Breached On</th>
-                </tr>"""
-            ]
-
-            # Table Data
             for b in manager_breaches:
-                # Link generation
-                record_url = f"/app/{b.doctype_name.lower().replace(' ', '-')}/{b.record_id}"
-                
-                # Handling None message
-                msg_display = b.message if b.message else "-"
+                delay_days = b.get("hours_exceeded") or 0
+
+                doctype_name = b.get("doctype_name") or "Lead"
+                dt_slug = doctype_name.lower().replace(" ", "-")
+
+                record_id = b.get("record_id") or "Unknown"
+                record_url = f"{base_url}/app/{dt_slug}/{record_id}"
 
                 rows.append(f"""
                 <tr>
-                    <td style="border: 1px solid #ddd; padding: 8px;"><a href="{record_url}">{b.record_id}</a></td>
-                    <td style="border: 1px solid #ddd; padding: 8px;">{b.vertical}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px;">{b.stage}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px; color: red;">{b.hours_exceeded:.1f}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px;">{b.breached_by}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px;">{msg_display}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px;">{get_datetime(b.breached_on).strftime('%Y-%m-%d %I:%M %p')}</td>
+                    <td style="border:1px solid #ddd;padding:6px;">
+                        <a href="{record_url}">{record_id}</a>
+                    </td>
+                    <td style="border:1px solid #ddd;padding:6px;">
+                        {b.get("vertical") or "-"}
+                    </td>
+                    <td style="border:1px solid #ddd;padding:6px;">
+                        {b.get("stage") or "-"}
+                    </td>
+                    <td style="border:1px solid #ddd;padding:6px;color:red;">
+                        {delay_days:.3f} Days
+                    </td>
+                    <td style="border:1px solid #ddd;padding:6px;">
+                        {b.get("breached_by") or "-"}
+                    </td>
+                    <td style="border:1px solid #ddd;padding:6px;">
+                        {b.get("message") or "-"}
+                    </td>
+                    <td style="border:1px solid #ddd;padding:6px;">
+                        {get_datetime(b.get("breached_on")).strftime('%Y-%m-%d %I:%M %p')}
+                    </td>
                 </tr>
                 """)
 
-            # Email Body HTML
             email_html = f"""
-            <div style="font-family: sans-serif; color: #333;">
+            <div style="font-family:Arial,sans-serif;">
                 <p>Hello,</p>
-                <p>Below is the summary of SLA breaches that occurred in your vertical/team over the last 24 hours:</p>
-                
-                <table style="border-collapse: collapse; width: 100%; font-size: 12px;">
-                    {''.join(rows)}
+                <p>Please find below the SLA breach summary for the last 24 hours:</p>
+
+                <table style="border-collapse:collapse;width:100%;font-size:11px;">
+                    <thead>
+                        <tr style="background:#f2f2f2;">
+                            <th style="border:1px solid #ddd;padding:6px;">Record</th>
+                            <th style="border:1px solid #ddd;padding:6px;">Vertical</th>
+                            <th style="border:1px solid #ddd;padding:6px;">Stage</th>
+                            <th style="border:1px solid #ddd;padding:6px;">Delay</th>
+                            <th style="border:1px solid #ddd;padding:6px;">Owner</th>
+                            <th style="border:1px solid #ddd;padding:6px;">Message</th>
+                            <th style="border:1px solid #ddd;padding:6px;">Time</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {''.join(rows)}
+                    </tbody>
                 </table>
-                
-                <p style="margin-top: 20px;">Please take necessary actions to clear the pending records.</p>
+
+                <p>Please take necessary action.</p>
                 <hr>
-                <p><small>This is an automated system notification.</small></p>
+                <small>Automated SLA Management System</small>
             </div>
             """
 
@@ -119,12 +155,15 @@ def sla_daily_summary():
                 recipients=[manager_email],
                 subject=subject,
                 message=email_html,
-                now=True
+                delayed=False
             )
+
             sent_count += 1
+            print(f"Email queued for {manager_email}")
 
         except Exception as e:
             frappe.logger().error(f"SLA Summary failed for {manager_email}: {e}")
 
-    frappe.logger().info(f"SLA Daily Summary sent to {sent_count} managers.")
+    frappe.db.commit()
+    print(f"Summary sent to {sent_count} managers.")
     return len(breaches)

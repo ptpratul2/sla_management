@@ -1,202 +1,165 @@
 
-
 # Copyright (c) 2024
-# SLA Management App
+# SLA Management App - Final Logic with Correct Field Names
 
 import frappe
 from frappe.utils import now_datetime, get_datetime, time_diff_in_hours
 
-
-def map_sla_vertical_to_record_vertical(sla_vertical):
-    mapping = {
-        "Permanent Staffing": "Permanent Staffing",
-        "Temporary Staffing": "Temporary Staffing"
-    }
-    return mapping.get(sla_vertical, sla_vertical)
-
-
-def get_reporting_manager_email(employee_name, vertical):
-    manager_email = frappe.db.get_value(
-        "CRM Reporting Hierarchy", 
-        {"full_name": employee_name, "department": vertical}, 
-        "reporting_manager_email"
+def get_hierarchy_records(employee_email, vertical):
+    """ CRM Reporting Hierarchy se manager nikaalta hai """
+    if not employee_email: return []
+    return frappe.get_all(
+        "CRM Reporting Hierarchy",
+        filters={
+            "email": employee_email.strip(),
+            "department": vertical.strip()
+        },
+        fields=["reporting_manager_email", "department"]
     )
-    return manager_email
-
 
 def send_sla_notification(user, doctype, docname, stage, hours_spent, hours_exceeded):
+    """ Notification Log entry """
+    days_exceeded = hours_exceeded / 24.0
     try:
         noti = frappe.new_doc("Notification Log")
         noti.for_user = user
         noti.type = "Alert"
         noti.document_type = doctype
         noti.document_name = docname
-        noti.subject = f"SLA Breach Alert: {docname}"
-        noti.email_content = (
-            f"SLA Breach: Record is in stage '{stage}' for "
-            f"{hours_spent:.1f} hours (exceeded by {hours_exceeded:.1f} hours)."
-        )
+        noti.subject = f"SLA Breach: {docname}"
+        noti.email_content = f"Record '{docname}' stuck in '{stage}' for {hours_spent:.1f} hrs."
         noti.insert(ignore_permissions=True)
     except Exception as e:
         frappe.logger().error(f"SLA Notification failed: {e}")
 
+def create_breach_log(rule, doc, log_stage, current_time, sla_start, hours_exceeded):
+    """ SLA Breach Log create karta hai with Correct Field Names from First Code """
+    hierarchy_list = get_hierarchy_records(doc.owner, doc.custom_vertical)
 
-def sla_checker():
-    frappe.logger().info("Starting SLA Checker...")
+    if not hierarchy_list:
+        hierarchy_list = [{"reporting_manager_email": "", "department": doc.custom_vertical}]
 
-    ALLOWED_VERTICALS = ["Permanent Staffing", "Temporary Staffing"]
-    ALLOWED_OPPORTUNITY_STAGES = ["Introduction", "Discussion", "Proposal", "Negotiation"]
+    created = False
+    for entry in hierarchy_list:
+        mgr_email = entry.get("reporting_manager_email") or ""
+        dept = entry.get("department") or doc.custom_vertical
 
-    # 1. 'message' field ko query mein add kiya gaya hai
-    active_rules = frappe.get_all(
-        "SLA Rule",
-        filters={"active": 1},
-        fields=[
-            "name",
-            "vertical",
-            "applies_to",
-            "max_hours_allowed",
-            "message"  # <--- Added this
-        ]
-    )
-
-    if not active_rules:
-        return 0
-
-    current_time = now_datetime()
-    breach_count = 0
-
-    for rule in active_rules:
-        if rule.vertical not in ALLOWED_VERTICALS:
+        # Duplicate Check (Fields from First Code)
+        if frappe.db.exists("SLA Breach Log", {
+            "record_id": doc.name,
+            "stage": log_stage,
+            "vertical": dept,
+            "reporting_manager_email": mgr_email
+        }):
             continue
 
-        record_vertical = map_sla_vertical_to_record_vertical(rule.vertical)
+        log = frappe.get_doc({
+            "doctype": "SLA Breach Log",
+            "vertical": dept,
+            "doctype_name": doc.doctype,
+            "record_id": doc.name,
+            "breached_by": doc.owner,
+            "stage": log_stage,
+            "hours_exceeded": hours_exceeded / 24.0, # Days logic
+            "last_stage_change_on": sla_start,
+            "breached_on": current_time,
+            "reporting_manager_email": mgr_email,
+            "message": rule.message # Message from Rule
+        })
+        log.insert(ignore_permissions=True)
+        created = True
+    
+    if created: frappe.db.commit()
+    return created
 
+def sla_checker():
+    print("SLA Checker Execution Started...")
+    frappe.logger().info("Starting SLA Checker...")
+    
+    rules = frappe.get_all("SLA Rule", filters={"active": 1}, fields=["*"])
+    now_time = now_datetime()
+    total_logs = 0
+
+    for rule in rules:
+        max_hrs = rule.max_hours_allowed
+        r_stage = rule.stage_value or "" # Handle NoneType
+        
+        # LEAD SECTION
         if rule.applies_to == "Lead":
             
-            # --- RULE-1: Lead New ---
-            leads_new = frappe.get_all(
-                "Lead",
-                filters={"status": "New", "custom_vertical": record_vertical},
-                fields=["name", "owner", "creation"]
-            )
+            # --- RULE 1: SEPARATE - ONLY FOR "NEW" STATUS ---
+            if r_stage == "New":
+                leads = frappe.get_all("Lead", 
+                    filters={"custom_vertical": rule.vertical, "status": "New"}, 
+                    fields=["name", "owner", "creation", "status", "custom_vertical"])
+                
+                for lead in leads:
+                    sla_start = get_datetime(lead.creation)
+                    hrs_spent = time_diff_in_hours(now_time, sla_start)
+                    if hrs_spent > max_hrs:
+                        if create_breach_log(rule, lead, "New", now_time, sla_start, hrs_spent - max_hrs):
+                            send_sla_notification(lead.owner, "Lead", lead.name, "New", hrs_spent, hrs_spent - max_hrs)
+                            total_logs += 1
 
-            for lead in leads_new:
-                sla_start = get_datetime(lead.creation)
-                hours_spent = time_diff_in_hours(current_time, sla_start)
+            # --- RULE 2: LEAD CONVERTED BUT NO OPPORTUNITY CREATED ---
+            elif r_stage == "Converted":
+                leads = frappe.get_all("Lead", 
+                    filters={"custom_vertical": rule.vertical, "status": "Converted"}, 
+                    fields=["name", "owner", "modified", "status", "custom_vertical"])
+                
+                for lead in leads:
+                    # Correct Linking Logic from First Code
+                    opp = frappe.db.get_value(
+                        "Opportunity",
+                        {"opportunity_from": "Lead", "party_name": lead.name},
+                        ["name", "creation"],
+                        as_dict=True
+                    )
+                    
+                    sla_start = get_datetime(lead.modified) # Time of conversion
+                    calc_end = get_datetime(opp.creation) if opp else now_time
+                    hrs_spent = time_diff_in_hours(calc_end, sla_start)
+                    
+                    if hrs_spent > max_hrs:
+                        if create_breach_log(rule, lead, "Converted", now_time, sla_start, hrs_spent - max_hrs):
+                            send_sla_notification(lead.owner, "Lead", lead.name, "Converted (Missing Opp)", hrs_spent, hrs_spent - max_hrs)
+                            total_logs += 1
 
-                if hours_spent <= rule.max_hours_allowed:
-                    continue
+            # --- RULE 3 & 4: MULTIPLE STATUS (Working, Nurturing) ---
+            elif "Working" in r_stage or "Nurturing" in r_stage:
+                allowed_statuses = [s.strip() for s in r_stage.split(',') if s.strip()]
+                
+                leads = frappe.get_all("Lead", 
+                    filters={
+                        "custom_vertical": rule.vertical, 
+                        "status": ["in", allowed_statuses]
+                    }, 
+                    fields=["name", "owner", "creation", "status", "custom_vertical"])
+                
+                for lead in leads:
+                    sla_start = get_datetime(lead.creation) # Creation se check
+                    hrs_spent = time_diff_in_hours(now_time, sla_start)
+                    if hrs_spent > max_hrs:
+                        if create_breach_log(rule, lead, lead.status, now_time, sla_start, hrs_spent - max_hrs):
+                            send_sla_notification(lead.owner, "Lead", lead.name, lead.status, hrs_spent, hrs_spent - max_hrs)
+                            total_logs += 1
 
-                if frappe.db.exists("SLA Breach Log", {"doctype_name": "Lead", "record_id": lead.name, "stage": "New"}):
-                    continue
-
-                hours_exceeded = hours_spent - rule.max_hours_allowed
-                mgr_email = get_reporting_manager_email(lead.owner, record_vertical)
-
-                # 2. Log mein 'message' copy kiya gaya hai
-                frappe.get_doc({
-                    "doctype": "SLA Breach Log",
-                    "vertical": record_vertical,
-                    "doctype_name": "Lead",
-                    "record_id": lead.name,
-                    "breached_by": lead.owner,
-                    "stage": "New",
-                    "hours_exceeded": hours_exceeded,
-                    "last_stage_change_on": sla_start,
-                    "breached_on": current_time,
-                    "reporting_manager_email": mgr_email or "",
-                    "message": rule.message  # <--- Rule se message log mein gaya
-                }).insert(ignore_permissions=True)
-
-                send_sla_notification(lead.owner, "Lead", lead.name, "New", hours_spent, hours_exceeded)
-                breach_count += 1
-                frappe.db.commit()
-
-            # --- RULE-2: Lead Converted ---
-            leads_converted = frappe.get_all(
-                "Lead",
-                filters={"status": "Converted", "custom_vertical": record_vertical},
-                fields=["name", "owner", "creation"]
-            )
-
-            for lead in leads_converted:
-                sla_start = get_datetime(lead.creation)
-                hours_spent = time_diff_in_hours(current_time, sla_start)
-                if hours_spent <= rule.max_hours_allowed:
-                    continue
-
-                opp = frappe.db.get_value("Opportunity", {"opportunity_from": "Lead", "party_name": lead.name}, ["name", "creation"], as_dict=True)
-                if opp:
-                    if time_diff_in_hours(get_datetime(opp.creation), sla_start) <= rule.max_hours_allowed:
-                        continue
-
-                if frappe.db.exists("SLA Breach Log", {"doctype_name": "Lead", "record_id": lead.name, "stage": "Converted"}):
-                    continue
-
-                hours_exceeded = hours_spent - rule.max_hours_allowed
-                mgr_email = get_reporting_manager_email(lead.owner, record_vertical)
-
-                # Log mein 'message' copy kiya gaya
-                frappe.get_doc({
-                    "doctype": "SLA Breach Log",
-                    "vertical": record_vertical,
-                    "doctype_name": "Lead",
-                    "record_id": lead.name,
-                    "breached_by": lead.owner,
-                    "stage": "Converted",
-                    "hours_exceeded": hours_exceeded,
-                    "last_stage_change_on": sla_start,
-                    "breached_on": current_time,
-                    "reporting_manager_email": mgr_email or "",
-                    "message": rule.message  # <--- Added
-                }).insert(ignore_permissions=True)
-
-                send_sla_notification(lead.owner, "Lead", lead.name, "Converted", hours_spent, hours_exceeded)
-                breach_count += 1
-                frappe.db.commit()
-
-        # =====================================================
-        # RULE-3 → OPPORTUNITY
-        # =====================================================
+        # OPPORTUNITY SECTION
         elif rule.applies_to == "Opportunity":
-            opportunities = frappe.get_all(
-                "Opportunity",
-                filters={"status": ["in", ALLOWED_OPPORTUNITY_STAGES], "custom_vertical": record_vertical},
-                fields=["name", "owner", "status", "creation"]
-            )
+            # Agreement ya jo bhi stage rule mein define ho
+            opps = frappe.get_all("Opportunity", 
+                filters={"custom_vertical": rule.vertical, "status": r_stage}, 
+                fields=["name", "owner", "modified", "status", "custom_vertical"])
+            
+            for opp in opps:
+                # Opportunity mein hamesha 'modified' se check hota hai (Stage Change Point)
+                sla_start = get_datetime(opp.modified)
+                hrs_spent = time_diff_in_hours(now_time, sla_start)
+                
+                if hrs_spent > max_hrs:
+                    if create_breach_log(rule, opp, r_stage, now_time, sla_start, hrs_spent - max_hrs):
+                        send_sla_notification(opp.owner, "Opportunity", opp.name, r_stage, hrs_spent, hrs_spent - max_hrs)
+                        total_logs += 1
 
-            for opp in opportunities:
-                sla_start = get_datetime(opp.creation)
-                hours_spent = time_diff_in_hours(current_time, sla_start)
-
-                if hours_spent <= rule.max_hours_allowed:
-                    continue
-
-                if frappe.db.exists("SLA Breach Log", {"doctype_name": "Opportunity", "record_id": opp.name, "stage": opp.status}):
-                    continue
-
-                hours_exceeded = hours_spent - rule.max_hours_allowed
-                mgr_email = get_reporting_manager_email(opp.owner, record_vertical)
-
-                # Log mein 'message' copy kiya gaya
-                frappe.get_doc({
-                    "doctype": "SLA Breach Log",
-                    "vertical": record_vertical,
-                    "doctype_name": "Opportunity",
-                    "record_id": opp.name,
-                    "breached_by": opp.owner,
-                    "stage": opp.status,
-                    "hours_exceeded": hours_exceeded,
-                    "last_stage_change_on": sla_start,
-                    "breached_on": current_time,
-                    "reporting_manager_email": mgr_email or "",
-                    "message": rule.message  # <--- Added
-                }).insert(ignore_permissions=True)
-
-                send_sla_notification(opp.owner, "Opportunity", opp.name, opp.status, hours_spent, hours_exceeded)
-                breach_count += 1
-                frappe.db.commit()
-
-    frappe.logger().info(f"SLA Checker Done. Total Breaches: {breach_count}")
-    return breach_count
+    frappe.logger().info(f"SLA Checker Completed. Total Logs: {total_logs}")
+    return total_logs
