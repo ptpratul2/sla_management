@@ -9,6 +9,21 @@ from frappe.utils import now_datetime, add_days, get_datetime, validate_email_ad
 from frappe import _
 
 
+def get_user_full_name(email):
+    """Get full name of user from email"""
+    if not email:
+        return "-"
+    try:
+        user = frappe.get_value("User", email, ["full_name", "first_name"], as_dict=True)
+        if user and user.full_name:
+            return user.full_name
+        elif user and user.first_name:
+            return user.first_name
+        return email
+    except:
+        return email
+
+
 def sla_daily_summary():
     """
     Daily Scheduled Job
@@ -96,6 +111,10 @@ def sla_daily_summary():
 
                 record_id = b.get("record_id") or "Unknown"
                 record_url = f"{base_url}/app/{dt_slug}/{record_id}"
+                
+                # Get owner's full name for better readability
+                owner_email = b.get("breached_by") or "-"
+                owner_display = get_user_full_name(owner_email) if owner_email != "-" else "-"
 
                 rows.append(f"""
                 <tr>
@@ -112,7 +131,7 @@ def sla_daily_summary():
                         {delay_days:.3f} Days
                     </td>
                     <td style="border:1px solid #ddd;padding:6px;">
-                        {b.get("breached_by") or "-"}
+                        {owner_display}
                     </td>
                     <td style="border:1px solid #ddd;padding:6px;">
                         {b.get("message") or "-"}

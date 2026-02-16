@@ -32,21 +32,33 @@ def send_sla_notification(user, doctype, docname, stage, hours_spent, hours_exce
     except Exception as e:
         frappe.logger().error(f"SLA Notification failed: {e}")
 
-def create_breach_log(rule, doc, log_stage, current_time, sla_start, hours_exceeded):
+def get_record_owner(doc, doctype):
+    """Get the correct owner based on doctype - lead_owner for Lead, opportunity_owner for Opportunity"""
+    if doctype == "Lead":
+        return doc.get("lead_owner") or doc.get("owner")
+    elif doctype == "Opportunity":
+        return doc.get("opportunity_owner") or doc.get("owner")
+    else:
+        return doc.get("owner")
+
+def create_breach_log(rule, doc, doctype, log_stage, current_time, sla_start, hours_exceeded):
     """ SLA Breach Log create karta hai with Correct Field Names from First Code """
-    hierarchy_list = get_hierarchy_records(doc.owner, doc.custom_vertical)
+    # Get the correct owner based on doctype
+    record_owner = get_record_owner(doc, doctype)
+    
+    hierarchy_list = get_hierarchy_records(record_owner, doc.get("custom_vertical"))
 
     if not hierarchy_list:
-        hierarchy_list = [{"reporting_manager_email": "", "department": doc.custom_vertical}]
+        hierarchy_list = [{"reporting_manager_email": "", "department": doc.get("custom_vertical")}]
 
     created = False
     for entry in hierarchy_list:
         mgr_email = entry.get("reporting_manager_email") or ""
-        dept = entry.get("department") or doc.custom_vertical
+        dept = entry.get("department") or doc.get("custom_vertical")
 
         # Duplicate Check (Fields from First Code)
         if frappe.db.exists("SLA Breach Log", {
-            "record_id": doc.name,
+            "record_id": doc.get("name"),
             "stage": log_stage,
             "vertical": dept,
             "reporting_manager_email": mgr_email
@@ -56,9 +68,9 @@ def create_breach_log(rule, doc, log_stage, current_time, sla_start, hours_excee
         log = frappe.get_doc({
             "doctype": "SLA Breach Log",
             "vertical": dept,
-            "doctype_name": doc.doctype,
-            "record_id": doc.name,
-            "breached_by": doc.owner,
+            "doctype_name": doctype,
+            "record_id": doc.get("name"),
+            "breached_by": record_owner,
             "stage": log_stage,
             "hours_exceeded": hours_exceeded / 24.0, # Days logic
             "last_stage_change_on": sla_start,
@@ -91,21 +103,22 @@ def sla_checker():
             if r_stage == "New":
                 leads = frappe.get_all("Lead", 
                     filters={"custom_vertical": rule.vertical, "status": "New"}, 
-                    fields=["name", "owner", "creation", "status", "custom_vertical"])
+                    fields=["name", "owner", "lead_owner", "creation", "status", "custom_vertical"])
                 
                 for lead in leads:
                     sla_start = get_datetime(lead.creation)
                     hrs_spent = time_diff_in_hours(now_time, sla_start)
                     if hrs_spent > max_hrs:
-                        if create_breach_log(rule, lead, "New", now_time, sla_start, hrs_spent - max_hrs):
-                            send_sla_notification(lead.owner, "Lead", lead.name, "New", hrs_spent, hrs_spent - max_hrs)
+                        record_owner = get_record_owner(lead, "Lead")
+                        if create_breach_log(rule, lead, "Lead", "New", now_time, sla_start, hrs_spent - max_hrs):
+                            send_sla_notification(record_owner, "Lead", lead.name, "New", hrs_spent, hrs_spent - max_hrs)
                             total_logs += 1
 
             # --- RULE 2: LEAD CONVERTED BUT NO OPPORTUNITY CREATED ---
             elif r_stage == "Converted":
                 leads = frappe.get_all("Lead", 
                     filters={"custom_vertical": rule.vertical, "status": "Converted"}, 
-                    fields=["name", "owner", "modified", "status", "custom_vertical"])
+                    fields=["name", "owner", "lead_owner", "modified", "status", "custom_vertical"])
                 
                 for lead in leads:
                     # Correct Linking Logic from First Code
@@ -121,8 +134,9 @@ def sla_checker():
                     hrs_spent = time_diff_in_hours(calc_end, sla_start)
                     
                     if hrs_spent > max_hrs:
-                        if create_breach_log(rule, lead, "Converted", now_time, sla_start, hrs_spent - max_hrs):
-                            send_sla_notification(lead.owner, "Lead", lead.name, "Converted (Missing Opp)", hrs_spent, hrs_spent - max_hrs)
+                        record_owner = get_record_owner(lead, "Lead")
+                        if create_breach_log(rule, lead, "Lead", "Converted", now_time, sla_start, hrs_spent - max_hrs):
+                            send_sla_notification(record_owner, "Lead", lead.name, "Converted (Missing Opp)", hrs_spent, hrs_spent - max_hrs)
                             total_logs += 1
 
             # --- RULE 3 & 4: MULTIPLE STATUS (Working, Nurturing) ---
@@ -134,14 +148,15 @@ def sla_checker():
                         "custom_vertical": rule.vertical, 
                         "status": ["in", allowed_statuses]
                     }, 
-                    fields=["name", "owner", "creation", "status", "custom_vertical"])
+                    fields=["name", "owner", "lead_owner", "creation", "status", "custom_vertical"])
                 
                 for lead in leads:
                     sla_start = get_datetime(lead.creation) # Creation se check
                     hrs_spent = time_diff_in_hours(now_time, sla_start)
                     if hrs_spent > max_hrs:
-                        if create_breach_log(rule, lead, lead.status, now_time, sla_start, hrs_spent - max_hrs):
-                            send_sla_notification(lead.owner, "Lead", lead.name, lead.status, hrs_spent, hrs_spent - max_hrs)
+                        record_owner = get_record_owner(lead, "Lead")
+                        if create_breach_log(rule, lead, "Lead", lead.status, now_time, sla_start, hrs_spent - max_hrs):
+                            send_sla_notification(record_owner, "Lead", lead.name, lead.status, hrs_spent, hrs_spent - max_hrs)
                             total_logs += 1
 
         # OPPORTUNITY SECTION
@@ -149,7 +164,7 @@ def sla_checker():
             # Agreement ya jo bhi stage rule mein define ho
             opps = frappe.get_all("Opportunity", 
                 filters={"custom_vertical": rule.vertical, "status": r_stage}, 
-                fields=["name", "owner", "modified", "status", "custom_vertical"])
+                fields=["name", "owner", "opportunity_owner", "modified", "status", "custom_vertical"])
             
             for opp in opps:
                 # Opportunity mein hamesha 'modified' se check hota hai (Stage Change Point)
@@ -157,8 +172,9 @@ def sla_checker():
                 hrs_spent = time_diff_in_hours(now_time, sla_start)
                 
                 if hrs_spent > max_hrs:
-                    if create_breach_log(rule, opp, r_stage, now_time, sla_start, hrs_spent - max_hrs):
-                        send_sla_notification(opp.owner, "Opportunity", opp.name, r_stage, hrs_spent, hrs_spent - max_hrs)
+                    record_owner = get_record_owner(opp, "Opportunity")
+                    if create_breach_log(rule, opp, "Opportunity", r_stage, now_time, sla_start, hrs_spent - max_hrs):
+                        send_sla_notification(record_owner, "Opportunity", opp.name, r_stage, hrs_spent, hrs_spent - max_hrs)
                         total_logs += 1
 
     frappe.logger().info(f"SLA Checker Completed. Total Logs: {total_logs}")
